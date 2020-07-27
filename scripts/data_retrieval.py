@@ -17,6 +17,7 @@ def get_data():
     """
     engine = get_engine()
     data_df = assemble_df(engine)
+    data_df.replace([None], False, inplace=True)
     data_df['distance_to_goal'] = calc_distances(data_df)
     return data_df
 
