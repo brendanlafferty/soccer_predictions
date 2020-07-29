@@ -1,6 +1,9 @@
+import os
 import yaml
 import sqlalchemy
+import numpy as np
 import pandas as pd
+from typing import Tuple
 
 _DEFAULT_QUERY = \
     """
@@ -8,17 +11,24 @@ _DEFAULT_QUERY = \
     FROM {}
     WHERE "eventName" = 'Shot'
     """
+# location vector components
+LocationVectorComps = Tuple[pd.Series, pd.Series, pd.Series]
 
 
-def get_data():
+def get_data() -> pd.DataFrame:
     """
-
-    :return:
+    main function that gets the raw data all engineered features
+    :return: dataframe of data and engineered features
     """
-    engine = get_engine()
-    data_df = assemble_df(engine)
+    sql_engine = get_engine()
+    data_df = assemble_df(sql_engine)
+    # Clean data
     data_df.replace([None], False, inplace=True)
+
+    # Engineered Features:
     data_df['distance_to_goal'] = calc_distances(data_df)
+    data_df['apparent_size_rad'] = calc_apparent_size_radians(data_df)
+
     return data_df
 
 
@@ -39,7 +49,8 @@ def get_db_location() -> str:
     a string ready for sqlalchemy to connect to
     :return: database location string
     """
-    with open('../keys/sql_cred.yml') as fp:
+    sql_cred_loc = get_sql_cred_location()
+    with open(sql_cred_loc) as fp:
         sql_dict = yaml.safe_load(fp)
 
     return sql_dict['sql_url']
@@ -87,13 +98,14 @@ def calc_distances(events_df: pd.DataFrame) -> pd.Series:
     """
     calculates the distance of an event from the center of the goal. Unfortunately soccer pitches
     are not uniformly sized so some assumptions are made currently that length and width are equal
-    to the largest allowable size in international competition
+    to the largest allowable size in international competition.  Originally I was computing in
+    meters however soccer is fundamentally an imperial game ...
     :param events_df: dataframe of events
     :return: distances for each event.
     """
     # a confounding variable is that soccer pitches are not uniformly sized
-    x_dimension = 110  # length of largest international pitch in meters
-    y_dimension = 75  # width of largest international pitch in meters
+    x_dimension = 120  # length of largest international pitch in yards
+    y_dimension = 80  # width of largest international pitch in yards
 
     x_squared = ((events_df['x1'] - 100) * x_dimension / 100) ** 2  # accounting for percentage
     y_squared = ((events_df['y1'] - 50) * y_dimension / 100) ** 2
@@ -102,6 +114,61 @@ def calc_distances(events_df: pd.DataFrame) -> pd.Series:
     return distances
 
 
+def calc_apparent_size_radians(events_df: pd.DataFrame) -> np.ndarray:
+    """
+    calculates the apparent size of the goal in radians
+    :param events_df: events df to calculate goal size
+    :return: an array of the
+    """
+    goal_vectors = get_goal_vectors(events_df[['x1', 'y1']])
+    theta = calc_theta(goal_vectors)
+
+    return theta
+
+
+def get_sql_cred_location() -> str:
+    """
+    Gets the absolute path to the helper file
+    :return: absolute path to helper file
+    """
+    filename = os.path.abspath(__file__)
+    root_folder = filename[:filename.find('/scripts/')]
+
+    return os.path.join(root_folder, 'keys/sql_cred.yml')
+
+
+def get_goal_vectors(location_vector: pd.DataFrame) -> LocationVectorComps:
+    """
+    Gets vector components to each goal post
+    :param location_vector: a data frame with the x1 and y1 location as columns
+    :return: The components of the vectors to each goal post
+             x component,
+             y component to 1st goal post
+             y component to 2nd goal post
+    """
+    goal_width = (8/80)*100  # again soccer is imperial, goals are wide 8 yds
+    goal_vector_x = 100 - location_vector['x1']
+    goal_vector_y1 = 50 - location_vector['y1'] + (goal_width/2)
+    goal_vector_y2 = 50 - location_vector['y1'] - (goal_width/2)
+
+    return goal_vector_x, goal_vector_y1, goal_vector_y2
+
+
+def calc_theta(goal_vectors: LocationVectorComps) -> np.ndarray:
+    """
+    using the goal vectors from get_goal_vectors this function calculates the angle between the 2
+    vectors aka the apparent size of the goal in radians.
+    :param goal_vectors:
+    :return:
+    """
+    dot_prod = goal_vectors[0] * (goal_vectors[1] + goal_vectors[2])
+    abs_prod = (goal_vectors[0].pow(2) + goal_vectors[1].pow(2))**.5 * \
+               (goal_vectors[0].pow(2) + goal_vectors[2].pow(2))**.5
+    theta = np.arccos(dot_prod/abs_prod)
+    return theta
+
+
 if __name__ == '__main__':
     df = get_data()
+    print(df.describe())
     print(df.head())
