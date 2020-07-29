@@ -1,2 +1,3 @@
 # ignore yaml files
 *.yml
+.ipynb_checkpoints
