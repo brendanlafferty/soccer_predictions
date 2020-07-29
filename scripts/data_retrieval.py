@@ -1,9 +1,10 @@
 import os
+from typing import Tuple
+
 import yaml
 import sqlalchemy
 import numpy as np
 import pandas as pd
-from typing import Tuple
 
 _DEFAULT_QUERY = \
     """
@@ -50,8 +51,8 @@ def get_db_location() -> str:
     :return: database location string
     """
     sql_cred_loc = get_sql_cred_location()
-    with open(sql_cred_loc) as fp:
-        sql_dict = yaml.safe_load(fp)
+    with open(sql_cred_loc) as file_stream:
+        sql_dict = yaml.safe_load(file_stream)
 
     return sql_dict['sql_url']
 
@@ -71,8 +72,8 @@ def assemble_df(engine: sqlalchemy.engine.Engine, query: str = None) -> pd.DataF
 
     for table in tables:
         sql_query = query.format(table)
-        df = query_db(engine, sql_query)
-        data_dfs.append(df)
+        response_df = query_db(engine, sql_query)
+        data_dfs.append(response_df)
 
     data_df = pd.concat(data_dfs)
     return data_df
