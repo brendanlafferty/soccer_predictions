@@ -1,8 +1,9 @@
-import yaml
 import json
-import pandas as pd
-import sqlalchemy
 from warnings import warn
+
+import yaml
+import sqlalchemy
+import pandas as pd
 
 with open('../keys/sql_cred.yml') as fp:
     sql_dict = yaml.load(fp)
