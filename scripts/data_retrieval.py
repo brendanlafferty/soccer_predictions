@@ -1,5 +1,4 @@
 import os
-from typing import Tuple
 
 import yaml
 import sqlalchemy
@@ -12,14 +11,12 @@ _DEFAULT_QUERY = \
     FROM {}
     WHERE "eventName" = 'Shot'
     """
-# location vector components
-LocationVectorComps = Tuple[pd.Series, pd.Series, pd.Series]
 
 
 def get_data() -> pd.DataFrame:
     """
     main function that gets the raw data all engineered features
-    :return: dataframe of data and engineered features
+    :return: data frame of data and engineered features
     """
     sql_engine = get_engine()
     data_df = assemble_df(sql_engine)
@@ -27,8 +24,11 @@ def get_data() -> pd.DataFrame:
     data_df.replace([None], False, inplace=True)
 
     # Engineered Features:
-    data_df['distance_to_goal'] = calc_distances(data_df)
-    data_df['apparent_size_rad'] = calc_apparent_size_radians(data_df)
+    distances = calc_distances(data_df)
+    data_df['distance_to_goal'] = distances
+    goal_vectors = get_goal_vectors(data_df)
+    data_df['angular_size_rad_goal'] = calc_angular_size_radians(goal_vectors)
+    data_df['projected_size_yds_goal'] = cal_projected_size_yds(goal_vectors, distances)
 
     return data_df
 
@@ -57,12 +57,23 @@ def get_db_location() -> str:
     return sql_dict['sql_url']
 
 
+def get_sql_cred_location() -> str:
+    """
+    Gets the absolute path to the helper file
+    :return: absolute path to helper file
+    """
+    filename = os.path.abspath(__file__)
+    root_folder = filename[:filename.find('/scripts/')]
+
+    return os.path.join(root_folder, 'keys/sql_cred.yml')
+
+
 def assemble_df(engine: sqlalchemy.engine.Engine, query: str = None) -> pd.DataFrame:
     """
     queries every table in the data base with the same query
     :param engine: sqlalchemy engine for the connection
     :param query: sql query sting. if None the default one will be used
-    :return: the results of the queries concatenated into 1 dataframe
+    :return: the results of the queries concatenated into 1 data frame
     """
     if not query:
         query = _DEFAULT_QUERY
@@ -101,7 +112,7 @@ def calc_distances(events_df: pd.DataFrame) -> pd.Series:
     are not uniformly sized so some assumptions are made currently that length and width are equal
     to the largest allowable size in international competition.  Originally I was computing in
     meters however soccer is fundamentally an imperial game ...
-    :param events_df: dataframe of events
+    :param events_df: data frame of events
     :return: distances for each event.
     """
     # a confounding variable is that soccer pitches are not uniformly sized
@@ -115,56 +126,70 @@ def calc_distances(events_df: pd.DataFrame) -> pd.Series:
     return distances
 
 
-def calc_apparent_size_radians(events_df: pd.DataFrame) -> np.ndarray:
+def get_goal_vectors(events: pd.DataFrame) -> pd.DataFrame:
     """
-    calculates the apparent size of the goal in radians
-    :param events_df: events df to calculate goal size
-    :return: an array of the
+    Gets vector components to each goal post
+    :param events: a data frame with the x1 and y1 location as columns
+    :return: The components of the vectors to each goal post and to the midpoint
+             x component,
+             y component to 1st goal post
+             y component to 2nd goal post
+             y component to the middle of the goal
     """
-    goal_vectors = get_goal_vectors(events_df[['x1', 'y1']])
-    theta = calc_theta(goal_vectors)
+    goal_vectors = pd.DataFrame()
+    goal_width = (8/80)*100  # again soccer is imperial, goals are wide 8 yds
+    goal_vectors['x'] = 100 - events['x1']
+    goal_vectors['y1'] = 50 - events['y1'] + (goal_width / 2)
+    goal_vectors['y2'] = 50 - events['y1'] - (goal_width / 2)
+    goal_vectors['y_mid'] = 50 - events['y1']
+
+    return goal_vectors
+
+
+def calc_angular_size_radians(goal_vectors: pd.DataFrame) -> np.ndarray:
+    """
+    calculates the angular size of the goal in radians
+    :param goal_vectors: goal_vector data frame output from get_goal_vectors
+    :return: an array of the angles
+    """
+    x_component = goal_vectors['x']
+    y_component_1 = goal_vectors['y1']
+    y_component_2 = goal_vectors['y2']
+    theta = calc_theta(x_component, y_component_1, y_component_2)
 
     return theta
 
 
-def get_sql_cred_location() -> str:
+def cal_projected_size_yds(goal_vectors: pd.DataFrame, distances: pd.Series):
     """
-    Gets the absolute path to the helper file
-    :return: absolute path to helper file
-    """
-    filename = os.path.abspath(__file__)
-    root_folder = filename[:filename.find('/scripts/')]
-
-    return os.path.join(root_folder, 'keys/sql_cred.yml')
-
-
-def get_goal_vectors(location_vector: pd.DataFrame) -> LocationVectorComps:
-    """
-    Gets vector components to each goal post
-    :param location_vector: a data frame with the x1 and y1 location as columns
-    :return: The components of the vectors to each goal post
-             x component,
-             y component to 1st goal post
-             y component to 2nd goal post
-    """
-    goal_width = (8/80)*100  # again soccer is imperial, goals are wide 8 yds
-    goal_vector_x = 100 - location_vector['x1']
-    goal_vector_y1 = 50 - location_vector['y1'] + (goal_width/2)
-    goal_vector_y2 = 50 - location_vector['y1'] - (goal_width/2)
-
-    return goal_vector_x, goal_vector_y1, goal_vector_y2
-
-
-def calc_theta(goal_vectors: LocationVectorComps) -> np.ndarray:
-    """
-    using the goal vectors from get_goal_vectors this function calculates the angle between the 2
-    vectors aka the apparent size of the goal in radians.
+    calculates a projected size of the goal.
     :param goal_vectors:
+    :param distances:
     :return:
     """
-    dot_prod = goal_vectors[0] * (goal_vectors[1] + goal_vectors[2])
-    abs_prod = (goal_vectors[0].pow(2) + goal_vectors[1].pow(2))**.5 * \
-               (goal_vectors[0].pow(2) + goal_vectors[2].pow(2))**.5
+    x_component = goal_vectors['x']
+    y_component_1 = goal_vectors['y1']
+    y_component_2 = goal_vectors['y2']
+    y_component_mid = goal_vectors['y_mid']
+    theta_1 = calc_theta(x_component, y_component_mid, y_component_1)
+    theta_2 = calc_theta(x_component, y_component_2, y_component_mid)
+    projections_1 = np.abs(np.tan(theta_1)) * distances
+    projections_2 = np.abs(np.tan(theta_2)) * distances
+    projected_sizes = projections_1 + projections_2
+    return projected_sizes
+
+
+def calc_theta(x_comp, y1_comp, y2_comp) -> np.ndarray:
+    """
+    using the components of 2 vectors this function calculates the angle between the 2 vectors.
+    assumes a shared x component
+    :param x_comp: a shared x component to the goal
+    :param y1_comp: the first y component
+    :param y2_comp: the second y component
+    :return: the angular width of the goal
+    """
+    dot_prod = x_comp * (y1_comp + y2_comp)
+    abs_prod = (x_comp**2 + y1_comp**2)**.5 * (x_comp**2 + y2_comp**2)**.5
     theta = np.arccos(dot_prod/abs_prod)
     return theta
 
