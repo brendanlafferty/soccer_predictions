@@ -5,8 +5,8 @@ import yaml
 import sqlalchemy
 import pandas as pd
 
-with open('../keys/sql_cred.yml') as fp:
-    sql_dict = yaml.load(fp)
+with open('../keys/sql_cred.yml') as file_stream:
+    sql_dict = yaml.safe_load(file_stream)
 
 # Establish connection with soccer_data and get tables
 engine = sqlalchemy.create_engine(sql_dict['sql_url'])
@@ -27,7 +27,7 @@ for league in leagues_to_load:
     print(league)
 
 # Load league data:
-for league in leagues_to_load:
+for league in leagues_to_load:  # this is only 7 league long
     league_data_fp = file_path_generic.format(league)
     print(f'opening file for: {league}')
     with open(league_data_fp) as f_stream:
