@@ -1,0 +1,8 @@
+pandas
+PyYAML
+numpy
+sqlalchemy
+sklearn
+statsmodels
+seaborn
+matplotlib

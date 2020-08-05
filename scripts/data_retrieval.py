@@ -24,11 +24,13 @@ def get_data() -> pd.DataFrame:
     data_df.replace([None], False, inplace=True)
 
     # Spatial Engineered Features:
-    distances = calc_distances(data_df)
-    data_df['distance_to_goal'] = distances
-    goal_vectors = get_goal_vectors(data_df)
-    data_df['angular_size_rad_goal'] = calc_angular_size_radians(goal_vectors)
-    data_df['projected_size_yds_goal'] = calc_projected_size_yds(goal_vectors, distances)
+    data_df['distance_to_goal_mid'] = calc_distance_to_mid(data_df['x1'], data_df['y1'])
+    data_df['distance_to_goal_nearest'] = calc_distance_to_nearest(data_df['x1'], data_df['y1'])
+    data_df['angular_size_rad_goal'] = calc_angular_size_radians(data_df)
+    data_df['projected_size_yds_goal'] = calc_projected_size_yds(data_df['angular_size_rad_goal'],
+                                                                 data_df[
+                                                                     'distance_to_goal_nearest'],
+                                                                 data_df['y1'])
     data_df['kicked'] = get_kicked(data_df)
     data_df['side_of_field_matching_foot'] = compare_foot_to_side_of_field(data_df)
 
@@ -37,7 +39,7 @@ def get_data() -> pd.DataFrame:
     data_df['free_kick_30s_ago'] = get_free_kick_data(data_df, sql_engine)
 
     # Cross Referenced Data
-    data_df['dominant foot'] = get_dominant_foot(data_df, sql_engine)
+    data_df['dominant_foot'] = get_dominant_foot(data_df, sql_engine)
 
     return data_df
 
@@ -117,24 +119,58 @@ def query_db(engine: sqlalchemy.engine.Engine, query: str = None) -> pd.DataFram
     return data
 
 
-def calc_distances(shots_df: pd.DataFrame) -> pd.Series:
+def calc_distance_to_mid(xs: pd.Series, ys: pd.Series) -> pd.Series:
     """
     calculates the distance of an event from the center of the goal. Unfortunately soccer pitches
     are not uniformly sized so some assumptions are made currently that length and width are equal
     to the largest allowable size in international competition.  Originally I was computing in
     meters however soccer is fundamentally an imperial game ...
-    :param shots_df: data frame of shots
+    :param xs: x coordinates
+    :param ys: y coordinates
     :return: distances for each event.
     """
     # a confounding variable is that soccer pitches are not uniformly sized
     x_dimension = 120  # length of largest international pitch in yards
     y_dimension = 80  # width of largest international pitch in yards
 
-    x_squared = ((shots_df['x1'] - 100) * x_dimension / 100) ** 2  # accounting for percentage
-    y_squared = ((shots_df['y1'] - 50) * y_dimension / 100) ** 2
-    distances = (x_squared + y_squared) ** (1 / 2)
+    # the point (100%, 50%) being the center of the goal
+    x_squared = ((xs - 100) * x_dimension / 100) ** 2  # accounting for percentage
+    y_squared = ((ys - 50) * y_dimension / 100) ** 2
+    distance = (x_squared + y_squared) ** (1 / 2)
 
-    return distances
+    return distance
+
+
+def calc_distance_to_nearest(xs: pd.Series, ys: pd.Series) -> pd.Series:
+    """
+    calculates the distance of an event from the nearest point on the goal line (between the goal
+    posts). Unfortunately soccer pitches are not uniformly sized so some assumptions are made
+    currently that length and width are equal to the largest allowable size in international
+    competition.
+    :param xs: x coordinates
+    :param ys: y coordinates
+    :return: distances for each event
+    """
+    # a confounding variable is that soccer pitches are not uniformly sized
+    x_dimension = 120  # length of largest international pitch in yards
+    y_dimension = 80  # width of largest international pitch in yards
+
+    y_sym = ys.copy()
+    # the calculation is symetric about the 50% line
+    y_sym[y_sym < 50] = 100 - y_sym[y_sym < 50]
+
+    half_goal_width_in_percent = (8 / 80) / 2
+
+    # the point (100%, 50%) being the center of the goal
+    x_squared = ((xs - 100) * x_dimension / 100) ** 2  # accounting for percentage
+    y_squared = ((ys - 50) * y_dimension / 100) ** 2
+    distance = (x_squared + y_squared) ** (1 / 2)
+
+    mask_between_goal_posts = (y_sym < (50 + half_goal_width_in_percent))
+
+    distance[mask_between_goal_posts] = 100 - xs[mask_between_goal_posts]
+
+    return distance
 
 
 def get_goal_vectors(shots_df: pd.DataFrame) -> pd.DataFrame:
@@ -150,44 +186,54 @@ def get_goal_vectors(shots_df: pd.DataFrame) -> pd.DataFrame:
     goal_vectors = pd.DataFrame()
     goal_width = (8 / 80) * 100  # again soccer is imperial, goals are wide 8 yds
     goal_vectors['x'] = 100 - shots_df['x1']
-    goal_vectors['y1'] = 50 - shots_df['y1'] + (goal_width / 2)
-    goal_vectors['y2'] = 50 - shots_df['y1'] - (goal_width / 2)
+    goal_vectors['y1'] = 50 - shots_df['y1'] + (goal_width / 2)  # over 50%
+    goal_vectors['y2'] = 50 - shots_df['y1'] - (goal_width / 2)  # under 50%
     goal_vectors['y_mid'] = 50 - shots_df['y1']
 
     return goal_vectors
 
 
-def calc_angular_size_radians(goal_vectors: pd.DataFrame) -> np.ndarray:
+def calc_angular_size_radians(shots_df: pd.DataFrame) -> np.ndarray:
     """
     calculates the angular size of the goal in radians
-    :param goal_vectors: goal_vector data frame output from get_goal_vectors
+    :param shots_df: data frame of shots taker
     :return: an array of the angles
     """
-    x_component = goal_vectors['x']
-    y_component_1 = goal_vectors['y1']
-    y_component_2 = goal_vectors['y2']
-    theta = calc_theta(x_component, y_component_1, y_component_2)
-
+    y_conversion = 80/100  # 80yds/100%
+    x_conversion = 120/100 # 120yds/100%
+    y_over_x_conversion = y_conversion / x_conversion
+    goal_vectors = get_goal_vectors(shots_df)
+    theta_1 = np.arctan(goal_vectors['y1'] / goal_vectors['x'] * y_over_x_conversion)
+    theta_2 = np.arctan(goal_vectors['y2'] / goal_vectors['x'] * y_over_x_conversion)
+    # x_component = goal_vectors['x']
+    # y_component_1 = goal_vectors['y1']
+    # y_component_2 = goal_vectors['y2']
+    # theta = calc_theta(x_component, y_component_1, y_component_2)
+    theta = np.abs(theta_1-theta_2)
     return theta
 
 
-def calc_projected_size_yds(goal_vectors: pd.DataFrame, distances: pd.Series):
+def calc_projected_size_yds(angular_size: pd.Series,
+                            distance_to_nearest: pd.Series, ys: pd.Series) -> np.ndarray:
     """
-    calculates a projected size of the goal.
-    :param goal_vectors:
-    :param distances:
-    :return:
+    calculates a projected size of the goal.  This is a projection of the width of the goal in
+    yards. The projection is measured along a line passing through the nearest point on the goal
+    line between the posts and perpendicular to the line that connects that point to the event
+    location. this ensures that the projection is never greater than 8 yards (the size of the goal)
+    :param angular_size: angular size of the goal
+    :param distance_to_nearest: distance to the nearest point
+    :param ys: y position of the event
+    :return: a projection of the goal size
     """
-    x_component = goal_vectors['x']
-    y_component_1 = goal_vectors['y1']
-    y_component_2 = goal_vectors['y2']
-    y_component_mid = goal_vectors['y_mid']
-    theta_1 = calc_theta(x_component, y_component_mid, y_component_1)
-    theta_2 = calc_theta(x_component, y_component_2, y_component_mid)
-    projections_1 = np.abs(np.tan(theta_1)) * distances
-    projections_2 = np.abs(np.tan(theta_2)) * distances
-    projected_sizes = projections_1 + projections_2
-    return projected_sizes
+
+    # This will work for all the points outside the rectangle defined by the goal posts
+    projected_size = np.abs(np.tan(angular_size)) * distance_to_nearest
+
+    # Catching all the points between the goal posts
+    mask_ys_between_goal_posts = (ys >= 45) & (ys <= 55)
+    projected_size[mask_ys_between_goal_posts] = 8
+
+    return projected_size
 
 
 def calc_theta(x_comp, y1_comp, y2_comp) -> np.ndarray:
@@ -202,6 +248,7 @@ def calc_theta(x_comp, y1_comp, y2_comp) -> np.ndarray:
     dot_prod = x_comp * (y1_comp + y2_comp)
     abs_prod = (x_comp ** 2 + y1_comp ** 2) ** .5 * (x_comp ** 2 + y2_comp ** 2) ** .5
     theta = np.arccos(dot_prod / abs_prod)
+
     return theta
 
 
@@ -211,22 +258,25 @@ def get_kicked(shots_df: pd.DataFrame) -> pd.Series:
     :param shots_df: data frame of shots
     :return: boolean whether the ball was kicked (as opposed to headed or controlled with the body)
     """
-    return shots_df['401'] | shots_df['402']  # TAG: numbers
+    return (shots_df['401'] | shots_df['402']) * 1  # TAG: numbers
 
 
 def compare_foot_to_side_of_field(shots_df: pd.DataFrame) -> pd.Series:
     """
     Compares the foot used to the side of the field from which the shot is taken
-    0 means a mismatch, 1 means a match, and .5 means the shot was taken from the middle or the
-    field (± 2% ~ half the width of the goal)
+    -1 means a mismatch, 1 means a match, and 0 means the shot was taken from the middle or the
+    field (± 2% ~ half the width of the goal) or the shot was take with the head/body
     :param shots_df: data frame of shots
-    :return: 0 means a mismatch, 1 means a match, and .5 means the shot was taken from the middle
-             or the field (± 2% ~ half the width of the goal)
+    :return: -1 means a mismatch, 1 means a match, and 0 means the shot was taken from the middle
+             of the field (± 2% ~ half the width of the goal) or the shot was take with the
+             head/body
     """
-    right_matches = ((shots_df['y1'] > 52) & (shots_df['402'])) * 1.  # right   # TAG: numbers
-    left_matches = ((shots_df['y1'] < 48) & (shots_df['401'])) * 1.  # left   # TAG: numbers
-    center_shots = ((48 <= shots_df['y1']) & (shots_df['y1'] <= 52)) * .5
-    aggregated = right_matches + left_matches + center_shots
+    right_matches = ((shots_df['y1'] > 52) & (shots_df['402'])) * 1  # right   # TAG: numbers
+    left_matches = ((shots_df['y1'] < 48) & (shots_df['401'])) * 1  # left   # TAG: numbers
+    right_does_not_match = ((shots_df['y1'] > 52) & (shots_df['401'])) * -1
+    left_does_not_match = ((shots_df['y1'] < 48) & (shots_df['402'])) * -1  # left   # TAG: numbers
+
+    aggregated = right_matches + left_matches + right_does_not_match + left_does_not_match
     return aggregated
 
 
@@ -355,6 +405,8 @@ def get_free_kick_data(shots_df, engine) -> pd.Series:
 
 if __name__ == '__main__':
     df = get_data()
-    print(df.describe())
+    print(df[['projected_size_yds_goal']].describe())
     print(df.head())
     print(df.columns)
+    print(df['projected_size_yds_goal'].max())
+
